@@ -1,23 +1,17 @@
 package com.safad.bmsprobe
 
-import android.annotation.SuppressLint
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import android.webkit.CookieManager
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,14 +29,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,235 +55,27 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationManagerCompat
 import androidx.webkit.WebViewCompat
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.coroutines.resume
 
-// ---------------------------------------------------------------- model
-
-data class Venue(val code: String, val label: String, val url: String)
-
-data class ProbeResult(
-    val code: String,
-    val url: String,
-    val httpStatus: Int? = null,
-    val title: String = "",
-    val hasState: Boolean = false,
-    val codes: List<String> = emptyList(),
-    val bodyStart: String = "",
-    val blocked: Boolean = false,
-    val elapsedMs: Long = 0,
-    val note: String = "",
-    val error: String = "",
-) {
-    val sawTarget: Boolean get() = codes.any { it.startsWith("20261217") }
-
-    val verdict: String
-        get() = when {
-            blocked -> "BLOCKED — Cloudflare refuses this device"
-            error.isNotBlank() -> "ERROR — $error"
-            hasState && sawTarget -> "WORKS — and 17 Dec is on sale"
-            hasState -> "WORKS — page readable, no 17 Dec yet"
-            else -> "NO DATA — page loaded but state missing"
-        }
-
-    fun toJson(): String = JSONObject().apply {
-        put("code", code)
-        put("url", url)
-        put("httpStatus", httpStatus ?: -1)
-        put("title", title)
-        put("hasState", hasState)
-        put("codes", codes.joinToString(","))
-        put("blocked", blocked)
-        put("elapsedMs", elapsedMs)
-        put("note", note)
-        put("bodyStart", bodyStart)
-        put("error", error)
-    }.toString(2)
-}
-
-private val VENUES = listOf(
-    Venue("EVMK", "EVM Dolby (control — 17 Dec live)", "https://in.bookmyshow.com/cinemas/kochi/evm-dolby-cinema-fort-kochi/buytickets/EVMK"),
-    Venue("PMCE", "Padma (target)", "https://in.bookmyshow.com/cinemas/kochi/padma-cinema-kochi/buytickets/PMCE"),
-    Venue("SCKO", "Sarita (target)", "https://in.bookmyshow.com/cinemas/kochi/sarita-cinema-rgb-laser-4k-3d-atmos-kochi/buytickets/SCKO"),
-)
-
-// ---------------------------------------------------------------- probe engine
-
-private const val PROBE_JS = """
-(function () {
-  try {
-    var s = window.__INITIAL_STATE__;
-    var vn = s && s.venueShowtimesNew;
-    var codes = (vn && vn.showDates)
-      ? vn.showDates.map(function (d) { return d.DateCode + (d.isDisabled ? '(D)' : ''); })
-      : null;
-    return {
-      has: !!s,
-      codes: codes,
-      title: document.title || '',
-      body: (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').slice(0, 240)
-    };
-  } catch (e) {
-    return { has: false, codes: null, title: '', body: 'JSERR ' + e };
-  }
-})()
-"""
-
-@SuppressLint("SetJavaScriptEnabled")
-class ProbeRunner(context: Context) {
-
-    val webView: WebView = WebView(context)
-    private val handler = Handler(Looper.getMainLooper())
-
-    init {
-        val s = webView.settings
-        s.javaScriptEnabled = true
-        s.domStorageEnabled = true
-        s.databaseEnabled = true
-        s.cacheMode = WebSettings.LOAD_DEFAULT
-        s.mediaPlaybackRequiresUserGesture = true
-        s.blockNetworkImage = true
-        // strip the "; wv" WebView marker so the UA looks like plain Chrome
-        s.userAgentString = defaultUserAgent(context).replace("; wv", "")
-        webView.setBackgroundColor(0x00000000)
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
-        }
-    }
-
-    suspend fun probe(venue: Venue, timeoutMs: Long = 30000): ProbeResult =
-        withContext(Dispatchers.Main.immediate) {
-            suspendCancellableCoroutine { cont ->
-                val started = SystemClock.elapsedRealtime()
-                val done = AtomicBoolean(false)
-                var status: Int? = null
-                var netError = ""
-                var lastTitle = ""
-
-                fun finish(result: ProbeResult) {
-                    if (!done.compareAndSet(false, true)) return
-                    handler.removeCallbacksAndMessages(null)
-                    webView.stopLoading()
-                    webView.webViewClient = WebViewClient()
-                    if (cont.isActive) cont.resume(result)
-                }
-
-                fun build(
-                    has: Boolean,
-                    codes: List<String>,
-                    body: String,
-                    blocked: Boolean,
-                    note: String,
-                ) = ProbeResult(
-                    code = venue.code,
-                    url = venue.url,
-                    httpStatus = status,
-                    title = lastTitle,
-                    hasState = has,
-                    codes = codes,
-                    bodyStart = body,
-                    blocked = blocked,
-                    elapsedMs = SystemClock.elapsedRealtime() - started,
-                    note = note,
-                    error = netError,
-                )
-
-                fun poll() {
-                    if (done.get()) return
-                    val elapsed = SystemClock.elapsedRealtime() - started
-                    if (elapsed > timeoutMs) {
-                        finish(build(false, emptyList(), "", false, "timeout"))
-                        return
-                    }
-                    webView.evaluateJavascript(PROBE_JS) { raw ->
-                        if (done.get()) return@evaluateJavascript
-                        val obj = runCatching { JSONObject(raw ?: "") }.getOrNull()
-                        if (obj != null) {
-                            val has = obj.optBoolean("has")
-                            val body = obj.optString("body")
-                            val title = obj.optString("title")
-                            if (title.isNotBlank()) lastTitle = title
-
-                            val blocked = body.contains("have been blocked", true) ||
-                                title.contains("Attention Required", true) ||
-                                body.contains("Access Denied", true) ||
-                                body.contains("Just a moment", true)
-
-                            val arr = obj.optJSONArray("codes")
-                            val codes = buildList {
-                                if (arr != null) for (i in 0 until arr.length()) add(arr.optString(i))
-                            }
-
-                            if (blocked) {
-                                finish(build(has, codes, body, true, "blocked"))
-                                return@evaluateJavascript
-                            }
-                            if (has && codes.isNotEmpty()) {
-                                finish(build(has, codes, body, false, "ok"))
-                                return@evaluateJavascript
-                            }
-                        }
-                        handler.postDelayed({ poll() }, 600L)
-                    }
-                }
-
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView, url: String) {
-                        handler.post { poll() }
-                    }
-
-                    override fun onReceivedHttpError(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        response: WebResourceResponse,
-                    ) {
-                        if (request.isForMainFrame) status = response.statusCode
-                    }
-
-                    override fun onReceivedError(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        error: WebResourceError,
-                    ) {
-                        if (request.isForMainFrame) netError = error.description?.toString() ?: ""
-                    }
-                }
-
-                cont.invokeOnCancellation { webView.stopLoading() }
-
-                webView.loadUrl(venue.url)
-            }
-        }
-}
-
-private fun defaultUserAgent(context: Context): String = runCatching {
-    WebSettings.getDefaultUserAgent(context)
-}.getOrDefault("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-
-// ---------------------------------------------------------------- UI
+private val BG = Color(0xFF0B0B0C)
+private val CARD = Color(0xFF17171A)
+private val SUB = Color(0xFF8A8A92)
+private val GREEN = Color(0xFF35C759)
+private val RED = Color(0xFFE23744)
+private val AMBER = Color(0xFFE2A137)
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Notifier.createChannels(this)
         setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    primary = Color(0xFFE23744),
-                    surface = Color(0xFF141416),
-                    background = Color(0xFF0B0B0C),
-                )
-            ) {
-                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-                    Screen()
+            MaterialTheme(colorScheme = darkColorScheme(primary = RED, background = BG, surface = CARD)) {
+                Surface(color = BG, modifier = Modifier.fillMaxSize()) {
+                    Root()
                 }
             }
         }
@@ -292,132 +83,285 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Screen() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+private fun Root() {
+    val ctx = LocalContext.current
+    var tab by remember { mutableStateOf(0) }
 
-    var runner by remember { mutableStateOf<ProbeRunner?>(null) }
-    var results by remember { mutableStateOf<List<ProbeResult>>(emptyList()) }
-    var running by remember { mutableStateOf(false) }
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
 
-    val webViewVersion = remember {
-        runCatching {
-            val p = WebViewCompat.getCurrentWebViewPackage(context)
-            "${p?.packageName} ${p?.versionName}"
-        }.getOrDefault("unknown")
-    }
-    val ua = remember { runner?.webView?.settings?.userAgentString ?: defaultUserAgent(context) }
-
-    Box(Modifier.fillMaxSize()) {
-
-        // Off-screen, attached WebView so it has a real window and lifecycle.
-        AndroidView(
-            factory = { ctx -> ProbeRunner(ctx).also { runner = it }.webView },
-            modifier = Modifier.size(1.dp),
-        )
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            !NotificationManagerCompat.from(ctx).areNotificationsEnabled()
         ) {
-            item { Header() }
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
-            item {
-                InfoCard(
-                    rows = listOf(
-                        "Android" to "API ${Build.VERSION.SDK_INT} (${Build.VERSION.RELEASE})",
-                        "Device" to "${Build.MANUFACTURER} ${Build.MODEL}",
-                        "WebView" to webViewVersion,
-                    ),
-                    ua = ua,
-                )
-            }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp)) {
+            Text("Doomsday Watch", fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(
+                "Watches Padma and Sarita for 17 Dec · no movie-name matching",
+                fontSize = 12.sp,
+                color = SUB,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
 
-            item {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+            TabPill("Watch", tab == 0) { tab = 0 }
+            Spacer(Modifier.width(8.dp))
+            TabPill("Diagnose", tab == 1) { tab = 1 }
+        }
+
+        if (tab == 0) WatchScreen() else DiagnoseScreen()
+    }
+}
+
+@Composable
+private fun TabPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .background(if (selected) Color(0xFF2A2A30) else Color(0xFF141416), RoundedCornerShape(50))
+            .clickable { onClick() }
+            .padding(horizontal = 18.dp, vertical = 8.dp)
+    ) {
+        Text(label, fontSize = 12.sp, color = if (selected) Color.White else SUB)
+    }
+}
+
+// ------------------------------------------------------------------ watch
+
+@Composable
+private fun WatchScreen() {
+    val ctx = LocalContext.current
+    val running by WatchState.running.collectAsState()
+    val venues by WatchState.venues.collectAsState()
+    val target by WatchState.targetDate.collectAsState()
+    val nextAt by WatchState.nextCycleAt.collectAsState()
+    val degraded by WatchState.degraded.collectAsState()
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var hist by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
+    var notified by remember { mutableStateOf(Prefs.lastAlert(ctx, "PMCE") > 0) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    LaunchedEffect(running, nextAt) {
+        hist = History.recent(ctx, 30)
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { Spacer(Modifier.height(2.dp)) }
+
+        item {
+            StatusCard(running, nextAt - now, target, degraded)
+        }
+
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = {
-                        val r = runner ?: return@Button
-                        running = true
-                        results = emptyList()
-                        scope.launch {
-                            val acc = mutableListOf<ProbeResult>()
-                            for (v in VENUES) {
-                                acc += r.probe(v)
-                                results = acc.toList()
-                                delay(1200)
-                            }
-                            running = false
+                        if (running) {
+                            WatchService.stop(ctx)
+                        } else {
+                            WatchService.start(ctx)
                         }
                     },
-                    enabled = !running && runner != null,
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    modifier = Modifier.weight(1f).height(48.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (running) Color(0xFF2A2A30) else RED,
+                        contentColor = Color.White,
+                    ),
                 ) {
-                    if (running) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = Color.White,
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text("Probing…")
-                    } else {
-                        Text("Run probe", fontWeight = FontWeight.SemiBold)
-                    }
+                    Text(if (running) "Stop" else "Start watching", fontWeight = FontWeight.SemiBold)
+                }
+                Button(
+                    onClick = { WatchService.start(ctx); Unit },
+                    modifier = Modifier.weight(0.6f).height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = CARD, contentColor = Color.White),
+                ) {
+                    Text("Poll now", fontSize = 12.sp)
                 }
             }
+        }
 
-            if (results.isEmpty()) {
-                item { HintCard() }
+        items(venues) { v -> VenueCard(v) }
+
+        item { TargetCard(target) }
+
+        item { VenuePicker() }
+
+        item { BatteryCard() }
+
+        item {
+            Button(
+                onClick = {
+                    val v = ALL_VENUES.firstOrNull { it.code == "PMCE" } ?: return@Button
+                    Siren.start(ctx)
+                    Notifier.alarm(ctx, v, target.ifBlank { "20261217" }, listOf("20261216", "20261217"))
+                },
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CARD, contentColor = AMBER),
+            ) {
+                Text("Test the alarm (plays siren for real)", fontSize = 12.sp)
             }
+        }
 
-            items(results) { r ->
-                ResultCard(r) {
-                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(ClipData.newPlainText("probe", r.toJson()))
-                }
-            }
+        item {
+            Text(
+                "HISTORY",
+                fontSize = 10.sp,
+                color = SUB,
+                letterSpacing = 1.2.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
 
-            item {
+        if (hist.isEmpty()) {
+            item { Text("No polls recorded yet.", fontSize = 12.sp, color = SUB) }
+        }
+
+        items(hist) { h ->
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    "Reading window.__INITIAL_STATE__.venueShowtimesNew.showDates from the venue page, " +
-                        "using the system WebView. No movie-name matching, no seat maps.",
-                    fontSize = 11.sp,
-                    color = Color(0xFF77777F),
-                    modifier = Modifier.padding(top = 4.dp, bottom = 24.dp),
+                    History.label(h.at),
+                    fontSize = 10.sp,
+                    color = Color(0xFF6A6A72),
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.width(104.dp),
                 )
+                Text(h.code, fontSize = 11.sp, color = Color(0xFFCFCFD6), modifier = Modifier.width(52.dp))
+                Text(
+                    statusColor(h.status).let { h.status },
+                    fontSize = 10.sp,
+                    color = statusColor(h.status),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("${h.latencyMs} ms", fontSize = 9.sp, color = Color(0xFF5E5E66))
             }
+        }
+
+        item { Spacer(Modifier.height(30.dp)) }
+    }
+}
+
+@Composable
+private fun StatusCard(running: Boolean, msToNext: Long, target: String, degraded: Boolean) {
+    val accent = when {
+        degraded -> AMBER
+        running -> GREEN
+        else -> SUB
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(9.dp).background(accent, RoundedCornerShape(50)))
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    when {
+                        degraded -> "DEGRADED"
+                        running -> "WATCHING"
+                        else -> "STOPPED"
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = accent,
+                )
+                Spacer(Modifier.weight(1f))
+                if (running && msToNext > 0) {
+                    Text("next ${(msToNext / 1000).coerceAtLeast(0)}s", fontSize = 11.sp, color = SUB)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Target date $target · checks every ${Prefs.interval(LocalContext.current)}s",
+                fontSize = 11.sp,
+                color = SUB,
+            )
         }
     }
 }
 
 @Composable
-private fun Header() {
-    Column {
-        Text("BMS Probe", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-        Text(
-            "Does the WebView get through Cloudflare, and can it see 17 Dec?",
-            fontSize = 13.sp,
-            color = Color(0xFF9A9AA2),
-            modifier = Modifier.padding(top = 4.dp),
-        )
+private fun VenueCard(v: VenueState) {
+    val ctx = LocalContext.current
+    val accent = statusColor(v.status)
+    Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(8.dp).background(accent, RoundedCornerShape(50)))
+                Spacer(Modifier.width(8.dp))
+                Text(v.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                Spacer(Modifier.weight(1f))
+                Text(v.code, fontSize = 10.sp, color = SUB, fontFamily = FontFamily.Monospace)
+            }
+
+            Spacer(Modifier.height(7.dp))
+            Text(
+                if (v.codes.isEmpty()) "no dates read yet" else v.codes.joinToString("  "),
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = if (v.codes.contains(Prefs.target(ctx))) GREEN else Color(0xFFCFCFD6),
+            )
+
+            Spacer(Modifier.height(6.dp))
+            Text(
+                buildString {
+                    if (v.lastAt > 0) {
+                        append("checked ${((System.currentTimeMillis() - v.lastAt) / 1000)}s ago")
+                        append(" · ${v.latencyMs} ms")
+                    } else append("waiting for first poll")
+                    if (v.failures > 0) append(" · ${v.failures} fails")
+                },
+                fontSize = 10.sp,
+                color = Color(0xFF6A6A72),
+            )
+        }
     }
 }
 
 @Composable
-private fun InfoCard(rows: List<Pair<String, String>>, ua: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1E)), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            rows.forEach { (k, v) ->
-                Row {
-                    Text(k, fontSize = 12.sp, color = Color(0xFF8A8A92), modifier = Modifier.width(72.dp))
-                    Text(v, fontSize = 12.sp, color = Color(0xFFE6E6EA))
-                }
-            }
+private fun TargetCard(target: String) {
+    val ctx = LocalContext.current
+    var text by remember { mutableStateOf(target) }
+    Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Text("TARGET DATE", fontSize = 9.sp, color = SUB, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { s ->
+                    if (s.length <= 8 && s.all { it.isDigit() }) {
+                        text = s
+                        if (s.length == 8) {
+                            Prefs.setTarget(ctx, s)
+                            WatchState.targetDate.value = s
+                        }
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = androidx.compose.ui.text.TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                ),
+            )
             Text(
-                "UA: $ua",
-                fontSize = 9.sp,
+                "Format yyyyMMdd. 20261217 = Thu 17 Dec 2026.",
+                fontSize = 10.sp,
                 color = Color(0xFF6A6A72),
-                fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
@@ -425,90 +369,195 @@ private fun InfoCard(rows: List<Pair<String, String>>, ua: String) {
 }
 
 @Composable
-private fun HintCard() {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1E)), shape = RoundedCornerShape(14.dp)) {
-        Text(
-            "Tap Run probe. It loads three venue pages in the background, one after another. " +
-                "EVMK is the control: it has 17 Dec on sale, so if that one fails, the app is being blocked " +
-                "and the whole approach needs rethinking.",
-            fontSize = 12.sp,
-            color = Color(0xFF9A9AA2),
-            modifier = Modifier.padding(14.dp),
-        )
+private fun VenuePicker() {
+    val ctx = LocalContext.current
+    var codes by remember { mutableStateOf(Prefs.watchCodes(ctx)) }
+    Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Text("VENUES", fontSize = 9.sp, color = SUB, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ALL_VENUES.forEach { v ->
+                    FilterChip(
+                        selected = v.code in codes,
+                        onClick = {
+                            codes = if (v.code in codes) codes - v.code else codes + v.code
+                            Prefs.setWatchCodes(ctx, codes)
+                        },
+                        label = { Text(v.code, fontSize = 11.sp) },
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun ResultCard(r: ProbeResult, onCopy: () -> Unit) {
-    val accent = when {
-        r.blocked -> Color(0xFFE23744)
-        r.error.isNotBlank() -> Color(0xFFE28A37)
-        r.hasState -> Color(0xFF35C759)
-        else -> Color(0xFF8A8A92)
+private fun BatteryCard() {
+    val ctx = LocalContext.current
+    val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+    val ignoring = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    if (ignoring) return
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2A1A1A)), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Text("Battery optimisation is ON", fontSize = 12.sp, color = Color(0xFFFFB3B8), fontWeight = FontWeight.SemiBold)
+            Text(
+                "Android will throttle the poller within the hour. Allow unrestricted background use.",
+                fontSize = 11.sp,
+                color = SUB,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    runCatching {
+                        ctx.startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${ctx.packageName}"),
+                            )
+                        )
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = RED, contentColor = Color.White),
+            ) { Text("Allow", fontSize = 12.sp) }
+        }
+    }
+}
+
+private fun statusColor(status: String): Color = when (status.uppercase()) {
+    "HIT" -> RED
+    "OK" -> GREEN
+    "CHALLENGE" -> AMBER
+    "IDLE" -> SUB
+    else -> Color(0xFFB0562F)
+}
+
+// ------------------------------------------------------------------ diagnose
+
+@Composable
+private fun DiagnoseScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val engine = remember { PollEngine(ctx) }
+    var busy by remember { mutableStateOf(false) }
+    var rows by remember { mutableStateOf<List<LoadResult>>(emptyList()) }
+    var which by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    DisposableEffect(Unit) { onDispose { engine.close() } }
+
+    val wv = remember {
+        runCatching {
+            val p = WebViewCompat.getCurrentWebViewPackage(ctx)
+            "${p?.versionName}"
+        }.getOrDefault("unknown")
     }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF17171A)),
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth(),
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .background(accent, RoundedCornerShape(50))
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(r.code, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "HTTP ${r.httpStatus ?: "—"}  ·  ${r.elapsedMs} ms",
-                    fontSize = 11.sp,
-                    color = Color(0xFF77777F),
-                )
-            }
-
-            Text(
-                r.verdict,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = accent,
-            )
-
-            if (r.codes.isNotEmpty()) {
-                Text(
-                    r.codes.joinToString("  "),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFFCFCFD6),
-                )
-            }
-
-            if (r.title.isNotBlank()) {
-                Text("title: ${r.title}", fontSize = 10.sp, color = Color(0xFF77777F))
-            }
-
-            if (r.bodyStart.isNotBlank()) {
-                Text(
-                    r.bodyStart,
-                    fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF5E5E66),
-                    maxLines = 3,
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "copy json",
-                    fontSize = 11.sp,
-                    color = Color(0xFF6EA8FF),
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .clickable { onCopy() },
-                )
+        item { Spacer(Modifier.height(2.dp)) }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Info("Android", "API ${Build.VERSION.SDK_INT}")
+                    Info("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
+                    Info("WebView", wv)
+                    Text(
+                        "ua has ; wv stripped",
+                        fontSize = 9.sp,
+                        color = Color(0xFF5E5E66),
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         }
+        item {
+            Button(
+                onClick = {
+                    busy = true
+                    rows = emptyList()
+                    which = emptyList()
+                    scope.launch {
+                        val order = listOf(
+                            "EVMK" to CONTROL_URL,
+                            "PMCE" to (ALL_VENUES[0].baseUrl),
+                            "SCKO" to (ALL_VENUES[1].baseUrl),
+                        )
+                        for ((code, url) in order) {
+                            which = which + code
+                            rows = rows + engine.load(url, code, timeoutMs = 45_000)
+                            delay(800)
+                        }
+                        busy = false
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = RED, contentColor = Color.White),
+            ) { Text(if (busy) "Probing…" else "Run probe", fontWeight = FontWeight.SemiBold) }
+        }
+        item {
+            Text(
+                "EVMK is the control: 17 Dec is on sale there. " +
+                    "If it fails but PMCE passes, the challenge simply hasn't cleared yet — run again.",
+                fontSize = 11.sp,
+                color = SUB,
+            )
+        }
+        items(rows.size) { i ->
+            val r = rows[i]
+            val accent = when {
+                r.ok && r.codes.contains("20261217") -> GREEN
+                r.ok -> GREEN
+                r.challenge -> AMBER
+                else -> RED
+            }
+            Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).background(accent, RoundedCornerShape(50)))
+                        Spacer(Modifier.width(8.dp))
+                        Text(which.getOrElse(i) { "?" }, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text("${r.elapsedMs} ms", fontSize = 10.sp, color = SUB)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        when {
+                            r.ok -> "READ OK"
+                            r.challenge -> "CHALLENGE (Cloudflare, not blocked)"
+                            else -> "FAILED · ${r.error}"
+                        },
+                        fontSize = 12.sp,
+                        color = accent,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (r.codes.isNotEmpty()) {
+                        Text(
+                            r.codes.joinToString("  "),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFFCFCFD6),
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    if (r.title.isNotBlank()) {
+                        Text(r.title, fontSize = 9.sp, color = Color(0xFF5E5E66), modifier = Modifier.padding(top = 3.dp))
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(30.dp)) }
+    }
+}
+
+@Composable
+private fun Info(k: String, v: String) {
+    Row {
+        Text(k, fontSize = 11.sp, color = SUB, modifier = Modifier.width(70.dp))
+        Text(v, fontSize = 11.sp, color = Color(0xFFE6E6EA))
     }
 }
