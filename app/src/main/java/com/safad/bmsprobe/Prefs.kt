@@ -7,6 +7,7 @@ object Prefs {
 
     const val DEFAULT_TARGET = "20261217"
     val DEFAULT_CODES = setOf("PMCE", "SCKO")
+    val ALLOWED_CODES = setOf("PMCE", "SCKO", "EVMK")
 
     private fun sp(c: Context) = c.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -21,18 +22,17 @@ object Prefs {
     fun setInterval(c: Context, v: Int) = sp(c).edit().putInt("interval", v).apply()
 
     /**
-     * Only the two target screens are ever watchable. The control venue (EVMK) must never
-     * end up here: 17 Dec is already on sale there, so watching it would fire a false alarm
-     * the moment the service starts.
+     * Any of the three can be watched, but the control venue is opt-in only: 17 Dec is
+     * already on sale there, so it fires immediately once enabled.
      */
     fun watchCodes(c: Context): Set<String> {
         val raw = sp(c).getStringSet("codes", DEFAULT_CODES) ?: DEFAULT_CODES
-        val clean = raw.filter { it == "PMCE" || it == "SCKO" }.toSet()
+        val clean = raw.filter { it in ALLOWED_CODES }.toSet()
         return clean.ifEmpty { DEFAULT_CODES }
     }
 
     fun setWatchCodes(c: Context, v: Set<String>) {
-        val clean = v.filter { it == "PMCE" || it == "SCKO" }.toSet().ifEmpty { DEFAULT_CODES }
+        val clean = v.filter { it in ALLOWED_CODES }.toSet().ifEmpty { DEFAULT_CODES }
         sp(c).edit().putStringSet("codes", clean).apply()
     }
 
@@ -45,9 +45,6 @@ object Prefs {
 
     fun watchedVenues(c: Context): List<Venue> {
         val codes = watchCodes(c)
-        return listOfNotNull(
-            ALL_VENUES.firstOrNull { it.code == "PMCE" && "PMCE" in codes },
-            ALL_VENUES.firstOrNull { it.code == "SCKO" && "SCKO" in codes },
-        )
+        return ALL_VENUES.filter { it.code in codes }
     }
 }

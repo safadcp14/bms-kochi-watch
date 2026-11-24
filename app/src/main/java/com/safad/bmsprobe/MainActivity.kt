@@ -387,6 +387,11 @@ private fun ConfigCard(target: String, onEdit: () -> Unit) {
                 Text("Venues", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
                 Text(codes.joinToString("  ·  "), fontSize = 12.sp, color = Color.White)
             }
+            Spacer(Modifier.height(5.dp))
+            Row {
+                Text("Every", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
+                Text("${Prefs.interval(ctx)} seconds", fontSize = 12.sp, color = Color.White)
+            }
 
             Spacer(Modifier.height(9.dp))
             Text(
@@ -408,6 +413,7 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
     var phrase by remember { mutableStateOf("") }
     var date by remember { mutableStateOf(currentTarget) }
     var codes by remember { mutableStateOf(currentCodes) }
+    var interval by remember { mutableStateOf(Prefs.interval(ctx)) }
 
     if (!unlocked) {
         AlertDialog(
@@ -469,7 +475,11 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
                 Spacer(Modifier.height(14.dp))
                 Text("Venues", fontSize = 11.sp, color = SUB)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("PMCE" to "Padma", "SCKO" to "Sarita").forEach { (code, label) ->
+                    listOf(
+                        "PMCE" to "Padma",
+                        "SCKO" to "Sarita",
+                        "EVMK" to "EVM",
+                    ).forEach { (code, label) ->
                         FilterChip(
                             selected = code in codes,
                             onClick = {
@@ -480,9 +490,27 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
                     }
                 }
                 Text(
-                    "At least one has to stay on.",
+                    if (codes.isEmpty()) "At least one has to stay on."
+                    else "EVM already sells 17 Dec — it fires on the next poll.",
                     fontSize = 10.sp,
-                    color = if (codes.isEmpty()) AMBER else Color(0xFF5E5E66),
+                    color = if (codes.isEmpty() || "EVMK" in codes) AMBER else Color(0xFF5E5E66),
+                )
+
+                Spacer(Modifier.height(14.dp))
+                Text("Check every", fontSize = 11.sp, color = SUB)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(30, 60, 120, 300).forEach { s ->
+                        FilterChip(
+                            selected = interval == s,
+                            onClick = { interval = s },
+                            label = { Text("${s}s", fontSize = 11.sp) },
+                        )
+                    }
+                }
+                Text(
+                    "30s is the floor: faster gets the phone's IP rate-limited.",
+                    fontSize = 10.sp,
+                    color = Color(0xFF5E5E66),
                 )
             }
         },
@@ -491,7 +519,9 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
                 onClick = {
                     Prefs.setTarget(ctx, date)
                     Prefs.setWatchCodes(ctx, codes)
+                    Prefs.setInterval(ctx, interval)
                     WatchState.targetDate.value = date
+                    WatchState.intervalSec.value = interval
                     WatchState.resetVenues(Prefs.watchedVenues(ctx))
                     onDismiss()
                 },
