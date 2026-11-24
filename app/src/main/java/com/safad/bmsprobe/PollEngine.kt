@@ -88,6 +88,7 @@ class PollEngine(context: Context) {
     suspend fun load(url: String, expectedCode: String, timeoutMs: Long = 45000): LoadResult {
         val wv = webView ?: return LoadResult(error = "WebView unavailable in this process")
         return withContext(Dispatchers.Main.immediate) {
+            runCatching { wv.resumeTimers() }
             suspendCancellableCoroutine { cont ->
                 val started = SystemClock.elapsedRealtime()
                 val done = AtomicBoolean(false)
@@ -102,6 +103,13 @@ class PollEngine(context: Context) {
                     handler.removeCallbacksAndMessages(null)
                     runCatching { wv.stopLoading() }
                     wv.webViewClient = WebViewClient()
+                    // Unload the BookMyShow document between polls. The renderer stays warm
+                    // (cookies, TLS session) but the page's DOM and JS heap are freed, which
+                    // is most of the 200 MB it otherwise holds while idling in the background.
+                    runCatching {
+                        wv.loadUrl("about:blank")
+                        wv.pauseTimers()
+                    }
                     if (cont.isActive) cont.resume(r)
                 }
 
@@ -193,6 +201,8 @@ class PollEngine(context: Context) {
     fun close() {
         runCatching {
             webView?.stopLoading()
+            webView?.loadUrl("about:blank")
+            webView?.pauseTimers()
             webView?.destroy()
         }
     }

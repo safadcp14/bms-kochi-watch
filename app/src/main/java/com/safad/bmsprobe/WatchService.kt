@@ -45,7 +45,9 @@ class WatchService : Service() {
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Default, not Main: file history writes and the loop itself must never block the UI
+    // thread. PollEngine.load() hops to Main itself for the WebView calls.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var engine: PollEngine? = null
     private val poke = Channel<Unit>(Channel.CONFLATED)
     private var loop: Job? = null
