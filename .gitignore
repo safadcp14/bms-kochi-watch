@@ -1,2 +1,8 @@
 node_modules/
 package-lock.json
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
