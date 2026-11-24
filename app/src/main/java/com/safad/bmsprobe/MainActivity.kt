@@ -185,7 +185,7 @@ private fun WatchScreen() {
                     Text(if (running) "Stop" else "Start watching", fontWeight = FontWeight.SemiBold)
                 }
                 Button(
-                    onClick = { WatchService.start(ctx); Unit },
+                    onClick = { WatchService.pollNow(ctx) },
                     modifier = Modifier.weight(0.6f).height(48.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = CARD, contentColor = Color.White),
                 ) {

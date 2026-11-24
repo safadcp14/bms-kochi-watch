@@ -36,6 +36,13 @@ class WatchService : Service() {
         fun stop(c: Context) {
             c.startService(Intent(c, WatchService::class.java).setAction(ACTION_STOP))
         }
+
+        fun pollNow(c: Context) {
+            ContextCompat.startForegroundService(
+                c,
+                Intent(c, WatchService::class.java).setAction(ACTION_POLL_NOW)
+            )
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
