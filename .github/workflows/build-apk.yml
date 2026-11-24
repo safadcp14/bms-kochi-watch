@@ -20,10 +20,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install SDK components
-        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+      - name: Point Gradle at the preinstalled SDK
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
 
       - uses: gradle/actions/setup-gradle@v4
         with:
