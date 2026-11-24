@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -37,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -144,7 +146,8 @@ private fun WatchScreen() {
     val degraded by WatchState.degraded.collectAsState()
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     var hist by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
-    var notified by remember { mutableStateOf(Prefs.lastAlert(ctx, "PMCE") > 0) }
+    var confirmStop by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -154,6 +157,31 @@ private fun WatchScreen() {
     }
     LaunchedEffect(running, nextAt) {
         hist = History.recent(ctx, 30)
+    }
+
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text("Stop watching?") },
+            text = { Text("The watcher stops and you will not be alerted when 17 Dec opens.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStop = false
+                    WatchService.stop(ctx)
+                }) { Text("Stop", color = RED) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStop = false }) { Text("Keep watching") }
+            },
+        )
+    }
+
+    if (editing) {
+        ConfigDialog(
+            currentTarget = target,
+            currentCodes = Prefs.watchCodes(ctx),
+            onDismiss = { editing = false },
+        )
     }
 
     LazyColumn(
@@ -170,11 +198,7 @@ private fun WatchScreen() {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = {
-                        if (running) {
-                            WatchService.stop(ctx)
-                        } else {
-                            WatchService.start(ctx)
-                        }
+                        if (running) confirmStop = true else WatchService.start(ctx)
                     },
                     modifier = Modifier.weight(1f).height(48.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -196,9 +220,7 @@ private fun WatchScreen() {
 
         items(venues) { v -> VenueCard(v) }
 
-        item { TargetCard(target) }
-
-        item { VenuePicker() }
+        item { ConfigCard(target) { editing = true } }
 
         item { BatteryCard() }
 
@@ -333,64 +355,158 @@ private fun VenueCard(v: VenueState) {
 }
 
 @Composable
-private fun TargetCard(target: String) {
+private fun ConfigCard(target: String, onEdit: () -> Unit) {
     val ctx = LocalContext.current
-    var text by remember { mutableStateOf(target) }
+    val codes = Prefs.watchCodes(ctx).sorted()
+
     Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp)) {
-            Text("TARGET DATE", fontSize = 9.sp, color = SUB, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(
-                value = text,
-                onValueChange = { s ->
-                    if (s.length <= 8 && s.all { it.isDigit() }) {
-                        text = s
-                        if (s.length == 8) {
-                            Prefs.setTarget(ctx, s)
-                            WatchState.targetDate.value = s
-                        }
-                    }
-                },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                textStyle = androidx.compose.ui.text.TextStyle(
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("WATCH CONFIG", fontSize = 9.sp, color = SUB, letterSpacing = 1.1.sp)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "LOCKED",
+                    fontSize = 9.sp,
+                    color = Color(0xFF6A6A72),
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                ),
-            )
+                    modifier = Modifier
+                        .background(Color(0xFF232327), RoundedCornerShape(50))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Row {
+                Text("Date", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
+                Text(humanDate(target), fontSize = 12.sp, color = Color.White)
+                Spacer(Modifier.width(6.dp))
+                Text(target, fontSize = 10.sp, color = Color(0xFF6A6A72), fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.height(5.dp))
+            Row {
+                Text("Venues", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
+                Text(codes.joinToString("  ·  "), fontSize = 12.sp, color = Color.White)
+            }
+
+            Spacer(Modifier.height(9.dp))
             Text(
-                "Format yyyyMMdd. 20261217 = Thu 17 Dec 2026.",
+                "Locked so a pocket tap cannot change what it watches.",
                 fontSize = 10.sp,
-                color = Color(0xFF6A6A72),
-                modifier = Modifier.padding(top = 6.dp),
+                color = Color(0xFF5E5E66),
             )
+            TextButton(onClick = onEdit) {
+                Text("Change (needs confirmation)", fontSize = 11.sp, color = Color(0xFF6EA8FF))
+            }
         }
     }
 }
 
 @Composable
-private fun VenuePicker() {
+private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
-    var codes by remember { mutableStateOf(Prefs.watchCodes(ctx)) }
-    Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp)) {
-            Text("VENUES", fontSize = 9.sp, color = SUB, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ALL_VENUES.forEach { v ->
-                    FilterChip(
-                        selected = v.code in codes,
-                        onClick = {
-                            codes = if (v.code in codes) codes - v.code else codes + v.code
-                            Prefs.setWatchCodes(ctx, codes)
-                        },
-                        label = { Text(v.code, fontSize = 11.sp) },
+    var unlocked by remember { mutableStateOf(false) }
+    var phrase by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(currentTarget) }
+    var codes by remember { mutableStateOf(currentCodes) }
+
+    if (!unlocked) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Locked") },
+            text = {
+                Column {
+                    Text(
+                        "This decides what the watcher looks for and what wakes you up. " +
+                            "Type EDIT to unlock it.",
+                        fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = phrase,
+                        onValueChange = { phrase = it },
+                        singleLine = true,
+                        label = { Text("Type EDIT") },
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
-            }
-        }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { unlocked = true },
+                    enabled = phrase.trim().equals("EDIT", ignoreCase = true),
+                ) { Text("Unlock") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+        return
     }
+
+    val dateOk = date.length == 8 && date.all { it.isDigit() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Watch config") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = date,
+                    onValueChange = { s -> if (s.length <= 8 && s.all { it.isDigit() }) date = s },
+                    singleLine = true,
+                    label = { Text("Target date · yyyyMMdd") },
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    if (dateOk) humanDate(date) else "needs 8 digits",
+                    fontSize = 11.sp,
+                    color = if (dateOk) SUB else AMBER,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+
+                Spacer(Modifier.height(14.dp))
+                Text("Venues", fontSize = 11.sp, color = SUB)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("PMCE" to "Padma", "SCKO" to "Sarita").forEach { (code, label) ->
+                        FilterChip(
+                            selected = code in codes,
+                            onClick = {
+                                codes = if (code in codes) codes - code else codes + code
+                            },
+                            label = { Text(label, fontSize = 11.sp) },
+                        )
+                    }
+                }
+                Text(
+                    "At least one has to stay on.",
+                    fontSize = 10.sp,
+                    color = if (codes.isEmpty()) AMBER else Color(0xFF5E5E66),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    Prefs.setTarget(ctx, date)
+                    Prefs.setWatchCodes(ctx, codes)
+                    WatchState.targetDate.value = date
+                    WatchState.resetVenues(Prefs.watchedVenues(ctx))
+                    onDismiss()
+                },
+                enabled = dateOk && codes.isNotEmpty(),
+            ) { Text("Save & lock") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
+
+private fun humanDate(yyyymmdd: String): String = runCatching {
+    val parser = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+    val out = java.text.SimpleDateFormat("EEE d MMM yyyy", java.util.Locale.US)
+    out.format(parser.parse(yyyymmdd)!!)
+}.getOrDefault(yyyymmdd)
 
 @Composable
 private fun BatteryCard() {
