@@ -200,6 +200,7 @@ class WatchService : Service() {
                 codes = r.codes,
                 hit = hits.isNotEmpty(),
                 detail = when {
+                    movies.isEmpty() && dateOpen -> "date listed"
                     hits.isEmpty() && dateOpen -> "date listed"
                     hits.isEmpty() -> ""
                     else -> hits.joinToString(" · ") { "${it.title} x${it.times.size}" }
