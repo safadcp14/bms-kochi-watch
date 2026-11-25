@@ -42,20 +42,22 @@ class AlarmActivity : ComponentActivity() {
         val code = intent.getStringExtra("code") ?: "PMCE"
         val name = intent.getStringExtra("name") ?: code
         val target = intent.getStringExtra("target") ?: Prefs.target(this)
+        val movie = intent.getStringExtra("movie")?.takeIf { it.isNotBlank() }
+        val times = intent.getStringArrayListExtra("times").orEmpty()
         val url = intent.getStringExtra("url")
-            ?: ALL_VENUES.firstOrNull { it.code == code }?.urlFor(target)
-            ?: CONTROL_URL
+            ?: Prefs.watchedVenues(this).firstOrNull { it.code == code }?.urlFor(target)
+            ?: return
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                AlarmScreen(name, target, url) { silence() }
+                AlarmScreen(name, target, movie, times, url) { silence() }
             }
         }
     }
 
     private fun silence() {
         Siren.stop(this)
-        Notifier.cancelAlarm(this)
+        Notifier.cancelAlarms(this)
         finish()
     }
 
@@ -66,7 +68,14 @@ class AlarmActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AlarmScreen(name: String, target: String, url: String, onSilence: () -> Unit) {
+private fun AlarmScreen(
+    name: String,
+    target: String,
+    movie: String?,
+    times: List<String>,
+    url: String,
+    onSilence: () -> Unit,
+) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     Column(
         modifier = Modifier
@@ -76,18 +85,33 @@ private fun AlarmScreen(name: String, target: String, url: String, onSilence: ()
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("DOOMSDAY", fontSize = 44.sp, fontWeight = FontWeight.Black, color = Color.White)
+        Text(
+            movie?.uppercase() ?: humanDateShort(target).uppercase(),
+            fontSize = if (movie != null) 34.sp else 44.sp,
+            fontWeight = FontWeight.Black,
+            color = Color.White,
+            textAlign = TextAlign.Center,
+        )
         Spacer(Modifier.height(10.dp))
         Text(
-            "17 DEC IS OPEN",
+            if (movie != null) "TICKETS ARE LIVE · ${humanDateShort(target).uppercase()}" else "TICKETS ARE OPEN",
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
             color = Color(0xFFFFD9DB),
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(28.dp))
-        Text(name, fontSize = 17.sp, color = Color.White)
-        Text(target, fontSize = 13.sp, color = Color(0xFFFFB3B8))
+        Text(name, fontSize = 17.sp, color = Color.White, textAlign = TextAlign.Center)
+        Text(humanDate(target), fontSize = 13.sp, color = Color(0xFFFFB3B8))
+        if (times.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                times.take(5).joinToString(" · "),
+                fontSize = 15.sp,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+            )
+        }
         Spacer(Modifier.height(40.dp))
 
         Button(
