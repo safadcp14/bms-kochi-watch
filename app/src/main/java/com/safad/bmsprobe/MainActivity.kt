@@ -22,15 +22,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -68,6 +71,7 @@ private val SUB = Color(0xFF8A8A92)
 private val GREEN = Color(0xFF35C759)
 private val RED = Color(0xFFE23744)
 private val AMBER = Color(0xFFE2A137)
+private val BLUE = Color(0xFF6EA8FF)
 
 class MainActivity : ComponentActivity() {
 
@@ -88,6 +92,7 @@ class MainActivity : ComponentActivity() {
 private fun Root() {
     val ctx = LocalContext.current
     var tab by remember { mutableStateOf(0) }
+    val cfg by WatchState.configVersion.collectAsState()
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -101,15 +106,26 @@ private fun Root() {
         }
     }
 
+    val subtitle = remember(cfg) {
+        val venues = Prefs.watchedVenues(ctx)
+        val movies = Prefs.movies(ctx)
+        buildString {
+            append(venues.size)
+            append(if (venues.size == 1) " cinema" else " cinemas")
+            append(" · ")
+            append(
+                if (movies.isEmpty()) "any movie"
+                else movies.joinToString(", ") { it.title }
+            )
+            append(" · ")
+            append(humanDateShort(Prefs.target(ctx)))
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp)) {
-            Text("Doomsday Watch", fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            Text(
-                "Watches Padma and Sarita for 17 Dec · no movie-name matching",
-                fontSize = 12.sp,
-                color = SUB,
-                modifier = Modifier.padding(top = 3.dp),
-            )
+            Text("BMS Watch", fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(subtitle, fontSize = 12.sp, color = SUB, modifier = Modifier.padding(top = 3.dp))
         }
 
         Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
@@ -144,6 +160,7 @@ private fun WatchScreen() {
     val target by WatchState.targetDate.collectAsState()
     val nextAt by WatchState.nextCycleAt.collectAsState()
     val degraded by WatchState.degraded.collectAsState()
+    val cfg by WatchState.configVersion.collectAsState()
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     var hist by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     var confirmStop by remember { mutableStateOf(false) }
@@ -155,7 +172,7 @@ private fun WatchScreen() {
             delay(1000)
         }
     }
-    LaunchedEffect(running, nextAt) {
+    LaunchedEffect(running, nextAt, cfg) {
         hist = History.recent(ctx, 30)
     }
 
@@ -163,7 +180,7 @@ private fun WatchScreen() {
         AlertDialog(
             onDismissRequest = { confirmStop = false },
             title = { Text("Stop watching?") },
-            text = { Text("The watcher stops and you will not be alerted when 17 Dec opens.") },
+            text = { Text("The watcher stops and you will not be alerted when tickets open.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmStop = false
@@ -178,8 +195,9 @@ private fun WatchScreen() {
 
     if (editing) {
         ConfigDialog(
-            currentTarget = target,
-            currentCodes = Prefs.watchCodes(ctx),
+            currentTarget = Prefs.target(ctx),
+            currentVenues = Prefs.watchedVenues(ctx),
+            currentMovies = Prefs.movies(ctx),
             onDismiss = { editing = false },
         )
     }
@@ -218,7 +236,7 @@ private fun WatchScreen() {
             }
         }
 
-        items(venues) { v -> VenueCard(v) }
+        items(venues) { v -> VenueCard(v, target) }
 
         item { ConfigCard(target) { editing = true } }
 
@@ -227,9 +245,22 @@ private fun WatchScreen() {
         item {
             Button(
                 onClick = {
-                    val v = ALL_VENUES.firstOrNull { it.code == "PMCE" } ?: return@Button
+                    val v = Prefs.watchedVenues(ctx).firstOrNull()
+                        ?: SEED_VENUES.first()
+                    val movie = Prefs.movies(ctx).firstOrNull()
+                    val date = Prefs.target(ctx)
                     Siren.start(ctx)
-                    Notifier.alarm(ctx, v, target.ifBlank { "20261217" }, listOf("20261216", "20261217"))
+                    Notifier.alarm(
+                        ctx,
+                        AlertInfo(
+                            venue = v,
+                            targetDate = date,
+                            movie = movie?.title,
+                            times = listOf("10:15 AM", "1:30 PM", "9:45 PM"),
+                            url = v.urlFor(date),
+                            key = "TEST",
+                        )
+                    )
                 },
                 modifier = Modifier.fillMaxWidth().height(46.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = CARD, contentColor = AMBER),
@@ -253,25 +284,32 @@ private fun WatchScreen() {
         }
 
         items(hist) { h ->
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    History.label(h.at),
-                    fontSize = 10.sp,
-                    color = Color(0xFF6A6A72),
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.width(104.dp),
-                )
-                Text(h.code, fontSize = 11.sp, color = Color(0xFFCFCFD6), modifier = Modifier.width(52.dp))
-                Text(
-                    statusColor(h.status).let { h.status },
-                    fontSize = 10.sp,
-                    color = statusColor(h.status),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("${h.latencyMs} ms", fontSize = 9.sp, color = Color(0xFF5E5E66))
+            Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        History.label(h.at),
+                        fontSize = 10.sp,
+                        color = Color(0xFF6A6A72),
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.width(104.dp),
+                    )
+                    Text(h.code, fontSize = 11.sp, color = Color(0xFFCFCFD6), modifier = Modifier.width(52.dp))
+                    Text(
+                        h.status,
+                        fontSize = 10.sp,
+                        color = statusColor(h.status),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("${h.latencyMs} ms", fontSize = 9.sp, color = Color(0xFF5E5E66))
+                }
+                if (h.detail.isNotBlank()) {
+                    Text(
+                        h.detail,
+                        fontSize = 9.sp,
+                        color = Color(0xFF7D7D86),
+                        modifier = Modifier.padding(start = 104.dp, top = 1.dp),
+                    )
+                }
             }
         }
 
@@ -281,11 +319,14 @@ private fun WatchScreen() {
 
 @Composable
 private fun StatusCard(running: Boolean, msToNext: Long, target: String, degraded: Boolean) {
+    val ctx = LocalContext.current
     val accent = when {
         degraded -> AMBER
         running -> GREEN
         else -> SUB
     }
+    val venues = Prefs.watchedVenues(ctx)
+    val movies = Prefs.movies(ctx)
     Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -308,7 +349,15 @@ private fun StatusCard(running: Boolean, msToNext: Long, target: String, degrade
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "Target date $target · checks every ${Prefs.interval(LocalContext.current)}s",
+                buildString {
+                    append(humanDateShort(target))
+                    append(" · ")
+                    append(venues.size)
+                    append(if (venues.size == 1) " cinema" else " cinemas")
+                    append(" · ")
+                    append(if (movies.isEmpty()) "date only" else "${movies.size} movie(s)")
+                    append(" · every ${Prefs.interval(ctx)}s")
+                },
                 fontSize = 11.sp,
                 color = SUB,
             )
@@ -317,8 +366,7 @@ private fun StatusCard(running: Boolean, msToNext: Long, target: String, degrade
 }
 
 @Composable
-private fun VenueCard(v: VenueState) {
-    val ctx = LocalContext.current
+private fun VenueCard(v: VenueState, target: String) {
     val accent = statusColor(v.status)
     Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp)) {
@@ -335,8 +383,26 @@ private fun VenueCard(v: VenueState) {
                 if (v.codes.isEmpty()) "no dates read yet" else v.codes.joinToString("  "),
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
-                color = if (v.codes.contains(Prefs.target(ctx))) GREEN else Color(0xFFCFCFD6),
+                color = if (v.codes.contains(target)) GREEN else Color(0xFFCFCFD6),
             )
+
+            if (v.matches.any { it.title != "Any movie" }) {
+                Spacer(Modifier.height(7.dp))
+                v.matches.filter { it.title != "Any movie" }.forEach { m ->
+                    Text(
+                        buildString {
+                            append(m.title)
+                            if (m.times.isNotEmpty()) {
+                                append(" · ")
+                                append(m.times.take(4).joinToString(", "))
+                                if (m.times.size > 4) append(" +${m.times.size - 4}")
+                            }
+                        },
+                        fontSize = 11.sp,
+                        color = GREEN,
+                    )
+                }
+            }
 
             Spacer(Modifier.height(6.dp))
             Text(
@@ -357,7 +423,8 @@ private fun VenueCard(v: VenueState) {
 @Composable
 private fun ConfigCard(target: String, onEdit: () -> Unit) {
     val ctx = LocalContext.current
-    val codes = Prefs.watchCodes(ctx).sorted()
+    val venues = Prefs.watchedVenues(ctx)
+    val movies = Prefs.movies(ctx)
 
     Card(colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp)) {
@@ -377,19 +444,33 @@ private fun ConfigCard(target: String, onEdit: () -> Unit) {
 
             Spacer(Modifier.height(10.dp))
             Row {
-                Text("Date", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
+                Text("Date", fontSize = 11.sp, color = SUB, modifier = Modifier.width(60.dp))
                 Text(humanDate(target), fontSize = 12.sp, color = Color.White)
                 Spacer(Modifier.width(6.dp))
                 Text(target, fontSize = 10.sp, color = Color(0xFF6A6A72), fontFamily = FontFamily.Monospace)
             }
             Spacer(Modifier.height(5.dp))
             Row {
-                Text("Venues", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
-                Text(codes.joinToString("  ·  "), fontSize = 12.sp, color = Color.White)
+                Text("Cinemas", fontSize = 11.sp, color = SUB, modifier = Modifier.width(60.dp))
+                Text(
+                    venues.joinToString("  ·  ") { it.code },
+                    fontSize = 12.sp,
+                    color = Color.White,
+                )
             }
             Spacer(Modifier.height(5.dp))
             Row {
-                Text("Every", fontSize = 11.sp, color = SUB, modifier = Modifier.width(56.dp))
+                Text("Movies", fontSize = 11.sp, color = SUB, modifier = Modifier.width(60.dp))
+                Text(
+                    if (movies.isEmpty()) "Any movie (date only)"
+                    else movies.joinToString("  ·  ") { it.title },
+                    fontSize = 12.sp,
+                    color = Color.White,
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            Row {
+                Text("Every", fontSize = 11.sp, color = SUB, modifier = Modifier.width(60.dp))
                 Text("${Prefs.interval(ctx)} seconds", fontSize = 12.sp, color = Color.White)
             }
 
@@ -400,20 +481,32 @@ private fun ConfigCard(target: String, onEdit: () -> Unit) {
                 color = Color(0xFF5E5E66),
             )
             TextButton(onClick = onEdit) {
-                Text("Change (needs confirmation)", fontSize = 11.sp, color = Color(0xFF6EA8FF))
+                Text("Change (needs confirmation)", fontSize = 11.sp, color = BLUE)
             }
         }
     }
 }
 
 @Composable
-private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDismiss: () -> Unit) {
+private fun ConfigDialog(
+    currentTarget: String,
+    currentVenues: List<Venue>,
+    currentMovies: List<Movie>,
+    onDismiss: () -> Unit,
+) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var unlocked by remember { mutableStateOf(false) }
     var phrase by remember { mutableStateOf("") }
     var date by remember { mutableStateOf(currentTarget) }
-    var codes by remember { mutableStateOf(currentCodes) }
+    var venues by remember { mutableStateOf(currentVenues) }
+    var movies by remember { mutableStateOf(currentMovies) }
     var interval by remember { mutableStateOf(Prefs.interval(ctx)) }
+    var venueInput by remember { mutableStateOf("") }
+    var venueError by remember { mutableStateOf("") }
+    var movieInput by remember { mutableStateOf("") }
+    var movieError by remember { mutableStateOf("") }
+    var resolving by remember { mutableStateOf(false) }
 
     if (!unlocked) {
         AlertDialog(
@@ -448,12 +541,17 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
     }
 
     val dateOk = date.length == 8 && date.all { it.isDigit() }
+    val canSave = dateOk && venues.isNotEmpty() && !resolving
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Watch config") },
         text = {
-            Column {
+            Column(
+                Modifier
+                    .heightIn(max = 430.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 OutlinedTextField(
                     value = date,
                     onValueChange = { s -> if (s.length <= 8 && s.all { it.isDigit() }) date = s },
@@ -471,32 +569,147 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
                     color = if (dateOk) SUB else AMBER,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                if (movies.isEmpty()) {
+                    Text(
+                        "No movie selected: any date opening fires the alarm.",
+                        fontSize = 10.sp,
+                        color = Color(0xFF5E5E66),
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
 
-                Spacer(Modifier.height(14.dp))
-                Text("Venues", fontSize = 11.sp, color = SUB)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(
-                        "PMCE" to "Padma",
-                        "SCKO" to "Sarita",
-                        "EVMK" to "EVM",
-                    ).forEach { (code, label) ->
-                        FilterChip(
-                            selected = code in codes,
-                            onClick = {
-                                codes = if (code in codes) codes - code else codes + code
-                            },
-                            label = { Text(label, fontSize = 11.sp) },
-                        )
+                Spacer(Modifier.height(16.dp))
+                Text("Cinemas", fontSize = 11.sp, color = SUB)
+                venues.forEach { v ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(v.name, fontSize = 12.sp, color = Color.White)
+                            Text(
+                                "${v.code} · ${v.region}/${v.slug}",
+                                fontSize = 9.sp,
+                                color = Color(0xFF6A6A72),
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                        TextButton(onClick = { venues = venues.filterNot { it.code == v.code } }) {
+                            Text("Remove", fontSize = 10.sp, color = RED)
+                        }
                     }
                 }
-                Text(
-                    if (codes.isEmpty()) "At least one has to stay on."
-                    else "EVM already sells 17 Dec — it fires on the next poll.",
-                    fontSize = 10.sp,
-                    color = if (codes.isEmpty() || "EVMK" in codes) AMBER else Color(0xFF5E5E66),
+                if (venues.isEmpty()) {
+                    Text("At least one cinema has to stay on.", fontSize = 10.sp, color = AMBER)
+                }
+                OutlinedTextField(
+                    value = venueInput,
+                    onValueChange = { venueInput = it; venueError = "" },
+                    singleLine = true,
+                    label = { Text("Cinema URL") },
+                    placeholder = { Text("…/cinemas/kochi/name/buytickets/CODE", fontSize = 10.sp) },
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(venueError, fontSize = 10.sp, color = AMBER, modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            val v = BmsLinks.parseVenue(venueInput)
+                            if (v == null) {
+                                venueError = "Paste the cinema page URL (…/buytickets/CODE)."
+                            } else if (venues.any { it.code == v.code }) {
+                                venueError = "${v.code} is already watched."
+                            } else {
+                                venues = venues + v
+                                venueInput = ""
+                                venueError = ""
+                            }
+                        },
+                        enabled = venueInput.isNotBlank(),
+                    ) { Text("Add cinema", fontSize = 11.sp) }
+                }
 
                 Spacer(Modifier.height(14.dp))
+                Text("Movies (optional)", fontSize = 11.sp, color = SUB)
+                movies.forEach { m ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(m.title, fontSize = 12.sp, color = Color.White)
+                            Text(
+                                if (m.group.isNotBlank()) "${m.code} → ${m.group}"
+                                else "${m.code} · group unresolved",
+                                fontSize = 9.sp,
+                                color = if (m.group.isNotBlank()) Color(0xFF6A6A72) else AMBER,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                        TextButton(onClick = { movies = movies.filterNot { it.key == m.key } }) {
+                            Text("Remove", fontSize = 10.sp, color = RED)
+                        }
+                    }
+                }
+                if (movies.isNotEmpty()) {
+                    Text(
+                        "Alarms only when one of these films has a show on the target date.",
+                        fontSize = 10.sp,
+                        color = Color(0xFF5E5E66),
+                    )
+                }
+                OutlinedTextField(
+                    value = movieInput,
+                    onValueChange = { movieInput = it; movieError = "" },
+                    singleLine = true,
+                    label = { Text("Movie URL") },
+                    placeholder = { Text("…/movies/kochi/name/ET00523989", fontSize = 10.sp) },
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(movieError, fontSize = 10.sp, color = AMBER, modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            val parsed = BmsLinks.parseMovie(movieInput)
+                            if (parsed == null) {
+                                movieError = "Paste the movie page URL (…/movies/…/ET…)."
+                                return@TextButton
+                            }
+                            resolving = true
+                            movieError = ""
+                            scope.launch {
+                                // One-off WebView: the ET code in the URL is a single
+                                // language/format, so we resolve the movie-level EG group.
+                                val engine = PollEngine(ctx)
+                                val resolved = try {
+                                    runCatching { engine.resolveMovie(parsed) }.getOrNull()
+                                } finally {
+                                    engine.close()
+                                }
+                                val movie = if (resolved != null) {
+                                    Movie(
+                                        code = resolved.code,
+                                        group = resolved.group,
+                                        title = resolved.title,
+                                        slug = resolved.slug,
+                                        region = resolved.region,
+                                    )
+                                } else parsed
+                                movies = (movies + movie).distinctBy { it.key }
+                                movieError = if (resolved == null) {
+                                    "Could not read the page; matching by ET code and title only."
+                                } else ""
+                                movieInput = ""
+                                resolving = false
+                            }
+                        },
+                        enabled = movieInput.isNotBlank() && !resolving,
+                    ) { Text(if (resolving) "Resolving…" else "Add movie", fontSize = 11.sp) }
+                }
+
+                Spacer(Modifier.height(16.dp))
                 Text("Check every", fontSize = 11.sp, color = SUB)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(30, 60, 120, 300).forEach { s ->
@@ -518,25 +731,21 @@ private fun ConfigDialog(currentTarget: String, currentCodes: Set<String>, onDis
             TextButton(
                 onClick = {
                     Prefs.setTarget(ctx, date)
-                    Prefs.setWatchCodes(ctx, codes)
+                    Prefs.setVenues(ctx, venues)
+                    Prefs.setMovies(ctx, movies)
                     Prefs.setInterval(ctx, interval)
                     WatchState.targetDate.value = date
                     WatchState.intervalSec.value = interval
                     WatchState.resetVenues(Prefs.watchedVenues(ctx))
+                    WatchState.configVersion.value++
                     onDismiss()
                 },
-                enabled = dateOk && codes.isNotEmpty(),
+                enabled = canSave,
             ) { Text("Save & lock") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
-
-private fun humanDate(yyyymmdd: String): String = runCatching {
-    val parser = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
-    val out = java.text.SimpleDateFormat("EEE d MMM yyyy", java.util.Locale.US)
-    out.format(parser.parse(yyyymmdd)!!)
-}.getOrDefault(yyyymmdd)
 
 @Composable
 private fun BatteryCard() {
@@ -587,8 +796,8 @@ private fun DiagnoseScreen() {
     val scope = rememberCoroutineScope()
     val engine = remember { PollEngine(ctx) }
     var busy by remember { mutableStateOf(false) }
-    var rows by remember { mutableStateOf<List<LoadResult>>(emptyList()) }
-    var which by remember { mutableStateOf<List<String>>(emptyList()) }
+    var rows by remember { mutableStateOf<List<Pair<Venue, LoadResult>>>(emptyList()) }
+    val cfg by WatchState.configVersion.collectAsState()
 
     DisposableEffect(Unit) { onDispose { engine.close() } }
 
@@ -598,6 +807,10 @@ private fun DiagnoseScreen() {
             "${p?.versionName}"
         }.getOrDefault("unknown")
     }
+
+    val venues = remember(cfg) { Prefs.watchedVenues(ctx) }
+    val movies = remember(cfg) { Prefs.movies(ctx) }
+    val target = remember(cfg) { Prefs.target(ctx) }
 
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -610,6 +823,9 @@ private fun DiagnoseScreen() {
                     Info("Android", "API ${Build.VERSION.SDK_INT}")
                     Info("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
                     Info("WebView", wv)
+                    Info("Date", "$target · ${humanDateShort(target)}")
+                    Info("Cinemas", venues.joinToString(", ") { it.code })
+                    Info("Movies", if (movies.isEmpty()) "any" else movies.joinToString(", ") { it.title })
                     Text(
                         "ua has ; wv stripped",
                         fontSize = 9.sp,
@@ -625,38 +841,37 @@ private fun DiagnoseScreen() {
                 onClick = {
                     busy = true
                     rows = emptyList()
-                    which = emptyList()
                     scope.launch {
-                        val order = listOf(
-                            "EVMK" to CONTROL_URL,
-                            "PMCE" to (ALL_VENUES[0].baseUrl),
-                            "SCKO" to (ALL_VENUES[1].baseUrl),
-                        )
-                        for ((code, url) in order) {
-                            which = which + code
-                            rows = rows + engine.load(url, code, timeoutMs = 45_000)
+                        for (v in venues) {
+                            val r = engine.load(
+                                v.urlFor(target),
+                                v.code,
+                                timeoutMs = 45_000,
+                                targetDate = target,
+                                movies = movies,
+                            )
+                            rows = rows + (v to r)
                             delay(800)
                         }
                         busy = false
                     }
                 },
-                enabled = !busy,
+                enabled = !busy && venues.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = RED, contentColor = Color.White),
             ) { Text(if (busy) "Probing…" else "Run probe", fontWeight = FontWeight.SemiBold) }
         }
         item {
             Text(
-                "EVMK is the control: 17 Dec is on sale there. " +
-                    "If it fails but PMCE passes, the challenge simply hasn't cleared yet — run again.",
+                "Probes each cinema's page for the target date. A Cloudflare challenge is not a block — " +
+                    "the watcher retries on the next cycle.",
                 fontSize = 11.sp,
                 color = SUB,
             )
         }
         items(rows.size) { i ->
-            val r = rows[i]
+            val (v, r) = rows[i]
             val accent = when {
-                r.ok && r.codes.contains("20261217") -> GREEN
                 r.ok -> GREEN
                 r.challenge -> AMBER
                 else -> RED
@@ -666,7 +881,7 @@ private fun DiagnoseScreen() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(8.dp).background(accent, RoundedCornerShape(50)))
                         Spacer(Modifier.width(8.dp))
-                        Text(which.getOrElse(i) { "?" }, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(v.code, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Spacer(Modifier.weight(1f))
                         Text("${r.elapsedMs} ms", fontSize = 10.sp, color = SUB)
                     }
@@ -686,7 +901,24 @@ private fun DiagnoseScreen() {
                             r.codes.joinToString("  "),
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
-                            color = Color(0xFFCFCFD6),
+                            color = if (r.codes.contains(target)) GREEN else Color(0xFFCFCFD6),
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    if (r.events.isNotEmpty()) {
+                        Text(
+                            r.events.take(6).joinToString(" · ") { "${it.title} (${it.shows})" },
+                            fontSize = 9.sp,
+                            color = Color(0xFF8A8A92),
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    if (movies.isNotEmpty() && r.ok) {
+                        Text(
+                            if (r.shows.isEmpty()) "no watched movie on this date"
+                            else "matched: " + r.shows.map { it.title }.distinct().joinToString(", "),
+                            fontSize = 10.sp,
+                            color = if (r.shows.isEmpty()) SUB else GREEN,
                             modifier = Modifier.padding(top = 4.dp),
                         )
                     }

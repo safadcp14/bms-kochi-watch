@@ -14,6 +14,7 @@ data class HistoryEntry(
     val latencyMs: Long,
     val codes: List<String>,
     val hit: Boolean,
+    val detail: String = "",
 )
 
 object History {
@@ -33,6 +34,7 @@ object History {
                 put("latency", e.latencyMs)
                 put("codes", e.codes.joinToString(","))
                 put("hit", e.hit)
+                if (e.detail.isNotBlank()) put("detail", e.detail)
             }
             file(c).appendText(json.toString() + "\n")
             val f = file(c)
@@ -58,6 +60,7 @@ object History {
                         latencyMs = o.optLong("latency"),
                         codes = o.optString("codes").split(",").filter { it.isNotBlank() },
                         hit = o.optBoolean("hit"),
+                        detail = o.optString("detail"),
                     )
                 }.getOrNull()
             }

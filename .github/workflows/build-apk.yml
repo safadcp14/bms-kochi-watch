@@ -44,8 +44,8 @@ jobs:
           tag_name: probe-${{ github.run_number }}
           name: BMS Probe build ${{ github.run_number }}
           body: |
-            Sideload on Android 13. Open, tap **Run probe**, read the three cards.
-            EVMK is the control (17 Dec is live there).
+            Sideload on Android 13. Add any cinema URL, any target date, and
+            optionally a movie URL (resolved to its EG group). One alarm per new match.
           files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
